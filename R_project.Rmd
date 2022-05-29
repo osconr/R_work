@@ -1,0 +1,988 @@
+---
+title: 'MY472: Final assignment 2021/22'
+output: html_document
+---
+
+
+```{r}
+# Use this cell to load any libraries you use in the exercises
+suppressMessages(library("tidyverse"))
+suppressMessages(library("rvest"))
+suppressMessages(library("httr"))
+suppressMessages(library("quanteda"))
+suppressMessages(library("quanteda.textplots"))
+suppressMessages(library("DBI"))
+suppressMessages(library("RSQLite"))
+suppressMessages(library("jsonlite"))
+suppressMessages(library("gridExtra"))
+suppressMessages(library("lubridate"))
+#install.packages("WikidataQueryServiceR")
+suppressMessages(library("WikidataQueryServiceR"))
+suppressMessages(library("SPARQL"))
+
+load("authentication.rda")
+
+```
+
+
+
+### Exercise 1 (6 points)
+
+Using the file `posts.csv` in the data folder of this repo (the sample of 10,000 public Facebook posts by members of the US congress from 2017), solve the following with `dplyr`:
+
+- Do not consider posts with zero likes
+- For each remaining post (i.e. line in the data frame), the goal is now to compute the mean absolute deviation (mad) from the screen_name's average comment to like ratio and store it in a column `mad_clr` (with some small variations discussed below). Note that this requires you to first compute the comment to like ratio `clr` and then the average comment to like ratio for each `screen_name`. The final column `mad_clr` then, for most posts, stores the plain absolute value of the difference between a post's/line's `clr` and the associated politician's `average_clr`. In other words, the value of a single post/line $i$ (written by a politician $p$) in that `mad_clr` column can mostly be computed as: $mad\_clr_{i,p} = | clr_{i}-*average\_clr_{p} |$ (no need to use a loop for this though, `dplyr` allows to compute it in a vectorised way). There are only a few special cases where this column shall contain a slightly different value (these cases make the `dplyr` manipulations a bit more challenging, but do not have an inherent meaning):
+
+  - i) For posts with a `tolower(screen_name)` which contains "blum", subtract only 0.25*average_clr from the clr (note: screen names are just transformed to lower case letters here when checking whether they contain "blum" to make the search case-insensitive)
+  - ii) For posts with a `tolower(screen_name)` which contains "mce" AND that were posted on the 10th day of any month, subtract only 0.5*average_clr from the clr
+
+- Remove all posts with `mad_clr` values of zero
+- Print out the `screen_name` and `mad_clr` values of the 10 posts/lines that have the lowest remaining values in the `mad_clr` column
+
+```{r}
+# Reading in data
+posts <- read.csv("data/posts.csv", stringsAsFactors=FALSE)
+
+# Removing posts with zero likes
+posts <- posts %>% 
+  filter(likes_count != 0)
+
+# Calculating clr
+posts$clr <- posts$comments_count / posts$likes_count
+
+# Calculating average_clr
+posts <- posts %>% 
+  group_by(screen_name) %>% 
+  mutate(average_clr = mean(clr)) %>% 
+  ungroup()
+
+# Calcuating mad_clr with special cases
+posts <- posts %>% 
+  mutate(mad_clr = case_when(grepl("blum", tolower(screen_name)) ~ abs((clr - (0.25*average_clr))),
+                             (grepl("mce", tolower(screen_name))) &
+                               (format(as.Date(date, "%Y-%m-%d"), format ="%d") == 10) ~ abs((clr - (0.5*average_clr))),
+                             TRUE ~ abs((clr -average_clr))))
+
+
+# Removing instances where mad_clr is equal to zero     
+posts <- posts %>%
+  filter(mad_clr != 0) %>% 
+  select(all_of(c("screen_name","mad_clr")))
+
+#Sorting and printing required rows
+posts %>%
+  arrange(mad_clr) %>% 
+  head(10)
+
+```
+
+
+Hint: Any approach that yields the correct output here will receive full points. It can be convenient, however, to compute the `mad_clr` column for the three different cases (i.e. 1) usual rows, 2) case i) and 3) case ii)) in one go.
+
+
+
+### Exercise 2 (8 points)
+
+This question is based on pulling information from Joe Biden's (or indeed other people's) [Wikidata page](https://www.wikidata.org/wiki/Q6279). Wikidata is a structured data source for much of the information on Wikipedia with an excellent API. However, you will be scraping information from the website with HTML element selection and regex approaches to study these topics in this exercise.
+
+a) With the `rvest` package, get Joe Biden's description ("46th and current..") using a CSS/XML/XPath selector on the HTML. Print the text output.
+
+```{r}
+# Finding Joe biden's descriptions
+url <- "https://www.wikidata.org/wiki/Q6279"
+html <- read_html(url)
+
+biden_description <- html_nodes(html, css=".wikibase-entitytermsview-heading-description")
+html_text(biden_description)
+```
+
+b) Get all 'property' titles from under the 'Statements' header on the webpage as text using a CSS/XML/XPath selector. You should end up with a character vector along the lines of ("instance of", "image", "sex or gender", ...). Print the first 10 items. How many property titles are there?
+
+```{r}
+# Obtaining the property titles
+property_titles <- html_nodes(html, xpath= "//div[3]/div[3]/div[5]/div[1]/div[1]/div[3]/div/div[@*]/div[1]/div/a")
+for (i in seq(1,10,1)){
+  print(html_text(property_titles)[i])
+}            
+
+print(paste('Number of Statement property titles:', length(property_titles)))
+```
+
+c) Before HTML content is rendered by your web browser, or parsed by `rvest`, it is ultimately just text. With your knowledge of regular expressions, you can sometimes scrape the full HTML content of a website and identify all relevant parts from it with a regular expression in one go. We have provided the HTML content of Joe Biden's Wikidata page as a string in `htmltxt`. 
+
+```{r}
+htmltxt <- content(GET("https://www.wikidata.org/wiki/Q6279"), as='text')
+```
+
+With `stringr` from the `tidyverse`, use regular expressions on the `htmltxt` object (and no CSS/XML/XPath selection) to scrape the same output as from tasks a) and b). That is, match the page description and match all of the property titles. Print the text output as before and compare the number of property titles you find from the regex vs selector approaches.
+
+Hint 1: It might be useful to export and preview the full HTML text in a text editor (e.g. Atom). This will help you identify the HTML pattern (and subsequently the regex pattern) for the text that corresponds to the CSS selector you used previously.
+
+Hint 2: To only scrape the property title text, you may need to use a 'capturing group' and correctly index your `stringr` output.
+
+
+```{r}
+# Finding header
+str_match_all(htmltxt, '<div class="wikibase-entitytermsview-heading-description ">([A-Za-z0-9\\s]+)</div>')[[1]][1,2]
+
+#Finding property title text
+str_match_all(htmltxt, 'class="wikibase-statementgroupview-property-label" dir="auto"><a title="Property:P\\d*" href="/wiki/Property:P\\d*">([a-zA-z0-9\\s]+)</a></div>')[[1]][,2]
+
+```
+### When we use the regular expression, rather than a scraping package, we lose the ability to be so specific. Here we have collected 190 matches but, in reality, we only wanted to extract 58.
+
+
+### Exercise 3 (5 points)
+
+In this exercise, the goal is to create a small scraping script which can be run for a single iteration, and to then write down a crontab which could hypothetically run the code on a schedule.
+
+a) In the code chunk below, write code that 1) scrapes the image file "Today's featured picture" on https://en.wikipedia.org/wiki/Main_Page and stores it in the repo (this will require a little independent research on how to scrape image files) and 2) scrapes the text on the right of the image into a data frame with two columns `date` and `text` (also fill out the date column with the current date when scraping). Then append the new row to a csv file such as we have done in the coding session of week 11. When knitting your document before submitting, the code chunk below should therefore store a single image and a csv table with one line and two columns in your assignment repo that we can click on when grading.
+
+```{r}
+# Have used some code from the following link: https://newbedev.com/r-download-image-using-rvest
+
+# Finding the URL of the image
+url <- "https://en.wikipedia.org/wiki/Main_Page"
+webpage <- session(url)
+img.url <- webpage %>% html_nodes(xpath='/html/body/div[3]/div[3]/div[5]/div[1]/div[3]/div/div/table/tbody/tr/td[1]/a/img')
+img.url <- html_attr(img.url, 'src')
+img.url <- gsub("//" ,"", img.url)
+
+#Creating file name
+image_name <- paste0('todays_pic_',as.character(Sys.Date()), ".jpg")
+download.file(img.url, image_name , mode = "wb")
+
+# Taking description of picture
+description <- html_table(webpage, fill=T)
+desc_text <- as.character(description[[2]]['X2'][1,1])
+desc_text <- gsub("^(.*)\\n\\nPhotograph.*","\\1",desc_text)
+
+#Creating file if it doesn't exist
+if (file.exists("todays_picture.csv") == FALSE)
+  {writeLines(c("date, text"), "todays_picture.csv")}
+
+# Creating file of details
+pic_details_df <- data.frame(date=Sys.Date(),
+                 text=desc_text, 
+                 stringsAsFactors=FALSE) 
+
+# Adding a row to the csv
+write.table(pic_details_df, file="todays_picture.csv", 
+            append = TRUE,
+            row.names = FALSE,
+            col.names = FALSE,
+            sep=',')
+```
+
+b) To scrape continuously, you could run code like the one above on a schedule. For this, now imagine your code from the previous part was stored in a separate R script called `scrape_wikipedia_featured_picture.R` (no need to actually store it in such a file). Write down the text of a crontab below that would reboot a computer at 7.23am and then run the script at 8.12am each day.
+
+Note: There is no need to register for a cloud computing provider to answer this exercise, watching the last week's lecture is sufficient!
+
+```{bash, eval = FALSE}
+
+Your crontab text here
+
+23 7 * * * sudo reboot
+12 8 * * * Rscript /Users/conradosmond/Documents/MSc_ASDC_Repos/my472_assignments/final-assignment-osconr/scrape_wikipedia_featured_picture.R
+```
+
+
+
+### Exercise 4 (6 points)
+
+Consider the following 4 documents with short descriptions of some MSc programmes at the LSE. Write a function `compute_dfm()` which uses the documents as input and returns a document-feature matrix (dfm) with 4 rows and N columns (one column for each unique token). In your function, first convert all words in the texts to lowercase (this will reduce the number of unique words), but there is no need to remove any punctuation. Thus, your final dfm should have one column for each unique lower case word and each unique punctuation character in the texts. Its cells should be counts of how many times a given token appeared in a given document just like in the examples of dfms that we have looked at in the coding sessions.
+
+- Complete the function and run `compute_dfm(documents)` with the four sample documents
+- Print out the number of columns (i.e. unique tokens) of your returned `mydfm`
+- Print out the sum of all cells of your `mydfm` (this should return the total number of all words and punctuation characters in the texts because each cell contains counts)
+- Print out only the first ten rows and columns of your dfm, i.e. run `print(mydfm[1:10,1:10])`
+
+```{r}
+documents <- c("MSc Applied Social Data Science. This interdisciplinary programme will provide you with training in fundamental aspects of applied data science, computation and programming, and quantitative methods.",
+               "MSc Economics. This programme is intended to equip you with the main tools of the professional economist, whether you intend to work in government, central banking, international organisations or private sector firms such as economic consultancies.",
+               "The MSc Sociology provides rigorous and in-depth training in sociological theory, methodology, and key areas of sociological research.",
+               "The MSc Data Science provides training in data science methods, emphasising statistical perspectives. You will receive a thorough grounding in theory, as well as the technical and practical skills of data science.")
+
+
+names(documents) <- c("MSc Applied Social Data Science", "MSc Economics", "MSc Sociology","MSc Data Science")
+
+
+compute_dfm <- function(documents) {
+  
+  corpus_docs <- corpus(documents,docvars = data.frame(name = names(documents)))
+  
+  final_dfm <- corpus_docs %>%
+    tokens(remove_punct = FALSE) %>% 
+    dfm()
+
+  return(final_dfm)
+}
+
+# Creating dfm
+mydfm <- compute_dfm(documents)
+
+# Printing required info
+print(paste0("Number of columns: ",length(colnames(mydfm))))
+print(paste0("Sum of all cells: ",sum(mydfm)))
+
+# Printing dfm
+print(mydfm[1:4,1:10])
+
+```
+
+
+
+### Exercise 5 (9 points)
+
+Use `ggplot2` to replicate the bar chart on fully and partially vaccinated people from https://ourworldindata.org/covid-vaccinations as closely as possible with the given data and R functionalities. There is no need to animate the plot, just use the latest static plot and replicate it with `ggplot2.` As these data will change over time, feel free to download the image version from the website that you are going to replicate. Then you can add this image into the repo and afterwards bind it into this markdown e.g. with `![](imagename.png)` as a reference below your own plot.
+
+Note: When you click on `DOWNLOAD` below the plot on the [website](https://ourworldindata.org/covid-vaccinations), you can download the latest image as well as all data.
+
+
+```{r}
+
+# Reading in data
+vaccinations <- read.csv("owid-covid-data.csv")
+
+# Identifying columns needed
+cols_wanted <- colnames(vaccinations)[3:4]
+cols_wanted <- append(cols_wanted,colnames(vaccinations)[42:43])
+
+# Identifying countries needed
+countries_selected <- c("Bangladesh", "Brazil", "Canada", "Chile", "China", "Cuba","Egypt","Ethiopia","France",
+                        "Germany","India","Indonesia","Iran","Italy","Japan","Mexico","Nigeria","Pakistan",
+                        "Philippines","Portugal","Russia","Singapore","Thailand","Turkey","United Arab Emirates",
+                        "United Kingdom","United States","Vietnam","World")
+
+# Making necessary data cleaning steps
+vaccinations <- vaccinations %>% 
+  select(all_of(cols_wanted)) %>%
+  filter(!is.na(people_fully_vaccinated_per_hundred)) %>% 
+  filter(location %in% countries_selected) %>%
+  group_by(location) %>% 
+  filter(date == max(date)) %>%
+  filter(!is.na(people_vaccinated_per_hundred)) %>% 
+  mutate(people_partially_vaccinated_per_hundred = people_vaccinated_per_hundred - people_fully_vaccinated_per_hundred) %>% 
+  arrange(desc(people_vaccinated_per_hundred))
+
+
+# Pivoting dataframe
+vaccinations <- vaccinations %>%
+  #select(-people_vaccinated_per_hundred, -date) %>% 
+  pivot_longer(c(people_partially_vaccinated_per_hundred, people_fully_vaccinated_per_hundred), names_to = "type_of_vaccination", values_to = "vaccinations_per_hundred")
+
+#Creating ordering of data
+vaccinations$type_of_vaccination <- factor(vaccinations$type_of_vaccination, levels = c("people_partially_vaccinated_per_hundred","people_fully_vaccinated_per_hundred"))
+
+# Creating data for labels
+vac_summary <- vaccinations %>% 
+  group_by(location) %>% 
+  summarise(max_people_vaccinated_per_hundred = max(people_vaccinated_per_hundred))
+
+# Creating chart
+ggplot(vaccinations, aes(x = reorder(location, vaccinations_per_hundred/100, sum), y = vaccinations_per_hundred/100))+
+  geom_col(aes(fill = type_of_vaccination)) + scale_fill_manual(labels = c("Share of people only partly vaccinated\nagainst COVID-19","Share of people fully vaccinated\nagainst COVID-19"), values = c("seagreen3","darkgreen"),guide = guide_legend(reverse = TRUE))+ coord_flip() + 
+  labs(title = "Share of people vaccinated against COVID-19, Jan 2 2022", caption ="Source: Official data collated by Our World in Data\nNote:Alternative definitions of a full vaccination, e.g. having been infected with SARS-CoV-2 and having 1 dose of a 2-dose protocol, are \nignored to maximise comparability between countries") + 
+  geom_text(data = vac_summary, 
+            aes(x = reorder(location, max_people_vaccinated_per_hundred),
+                y = max_people_vaccinated_per_hundred/100,
+                label = scales::percent(x=max_people_vaccinated_per_hundred/100,accuracy=1L)),
+            hjust=(-0.1),
+            size=3) +
+  scale_y_continuous(labels = scales::percent, breaks=c(0,0.2,0.4,0.6,0.8), expand=c(0.0,0.0)) +
+  expand_limits(y = c(0,1.2))+
+  theme_minimal() + 
+  theme(plot.title = element_text(family="Times", vjust=0.2, size=17),
+        plot.title.position = "plot",
+        plot.caption.position =  "plot",
+        axis.title.y=element_blank(),
+          axis.title.x=element_blank(),
+          axis.text.y = element_text(face="bold"),
+          legend.position = "top",
+          legend.justification='left',
+          legend.direction='horizontal',
+          legend.title = element_blank(),
+          legend.text.align = 0,
+          panel.grid.major.y=element_blank(),
+          plot.caption = element_text(hjust = 0, color="gray50",size=7),
+          panel.grid.minor.x=element_blank())
+```
+
+
+
+![](coronavirus-data-explorer.png)
+
+### Exercise 6 (9 points)
+
+Create an SQLite database called `fb-posts.sqlite` and connect to it with the `DBI` package. Store the file `posts.csv` (without any editing in R) in the database as its only table `posts`. The table may only contain the original information from `posts.csv`, all computations in this exercise have to be done with SQL.
+
+With __only a single__ (which is the main challenge in this exercise) SQL query through `DBI`, replicate the output from Exercise 1. This means that the query should return the same 10 lowest `mad_clr` column values with the associated screen names as in Exercise 1.
+
+Hint: There is no need to transform screen names to lower case letters here to replicate the outcome from Exercise 1. The command "LIKE" is not case-sensitive in SQLite, so you can just use "LIKE" to find all screen names that contain terms such as "blum" etc. regardless of whether characters are upper or lower case. 
+
+
+```{r}
+#Writing table
+db <- dbConnect(RSQLite::SQLite(), "fb-posts.sqlite")
+posts <- read.csv("data/posts.csv", stringsAsFactors=FALSE)
+dbWriteTable(db, "posts", posts, overwrite=TRUE)
+
+
+# Running single query
+dbGetQuery(db, 
+  "SELECT screen_name, CASE
+    WHEN screen_name LIKE '%blum%'  THEN ABS(clr - 0.25*average_clr)
+    WHEN (screen_name LIKE '%mce%' AND SUBSTR(date, 9, 10) = '10' )   THEN ABS(clr - 0.5*average_clr)
+  ELSE ABS(clr - average_clr)
+  END AS mad_clr
+  FROM (SELECT *, ((1.0 * comments_count)/likes_count) AS clr,
+  AVG((1.0 * comments_count)/likes_count) OVER (PARTITION BY screen_name) AS average_clr
+  FROM posts
+  WHERE likes_count > 0)
+  WHERE mad_clr > 0
+  ORDER BY mad_clr 
+  LIMIT 10 ")
+
+```
+
+
+
+### Exercise 7 (22 points)
+
+The New York Times (NYT) APIs offer a rare free opportunity to analyse data since 1851 (the year of the first issue of the paper) and thereby a multitude of historical events or also topics over time. You can e.g. use the "Article Search API" to search through all articles without obtaining their texts explicitly. Alternatively, you could use the "Archive API" which allows to download all article headlines and lead paragraphs/snippets for a given month (and through iteration potentially for a range of years). While this does not allow to obtain the full articles, it still allows to download a lot of textual data and thereby do own textual analysis. There are also a range of other NYT APIs which you can find [here](https://developer.nytimes.com/apis) if these are of greater interest to you. Think about a topic you are very interested in and use the NYT API to develop and present a coherent analysis of the topic. This could be done with basic quantitative text analysis in `quanteda`, visualisations e.g. of keyword frequencies and time series with `ggplot2`, word clouds, written discussion, use of further R packages, etc.
+
+More creative and extensive solutions will receive higher marks here. Note, however, that here already a single API such as the "Archive API" can be used to obtain very large amounts of data here which can be sufficient for the most detailed analysis even beyond the scope of this assignment. 
+
+Hint: You might find the code examples from week 5 helpful for this exercise. Should you choose to use the "Archive API" to download some data, the last section in the file `02-nytimes-api.Rmd` illustrates how you can transform its output into a data frame. Usually the main available text is contained in the headline, abstract, lead_paragraph, and/or snippet columns (depending on which month/year you download some of these will be empty or the same). Note that the headline information in the data frame is nested and can be accessed with `df$headline$main`. Furthermore, `02-nytimes-api.Rmd` also gives an introduction to using the "Article Search API".
+
+#### In this section I will explore how 5 American historical icons, (ie. people who currently appear on US currency, or will soon appear on US currency ) are referenced in the NYT.
+
+#### Due to the amount of data collected, the data has been saved as csv files and the scraping scripts below do not run for Q7.
+
+#### In the first scraping section, I scrape how many articles mention each historical figures in each year, since 1970.
+
+```{r, eval=FALSE}
+# Setting key variables
+
+base_url <- "http://api.nytimes.com/svc/search/v2/articlesearch.json"
+on_money <- c("Andrew Jackson", "George Washington", "Abraham Lincoln", "Harriet Tubman", "Sacagawea")
+
+# This code below is adapted from the lecture/course materials
+# This code below creates two functions which scrape the number of mentions from the NYT API.
+nyt_count <- function(q, date1, date2) {
+  
+  # Get the return of the request
+  r <- GET(base_url, query = list(q = q,
+                                  "api-key" = authentication$apikey_NYT,
+                                  "begin_date" = date1,
+                                  "end_date" = date2))
+  
+  # Add a check whether rate limit was hit and retry until status code OK
+  while (r$status_code != 200){
+    message("Error occured. Retry after 10 seconds..")
+    Sys.sleep(10) # Wait 10 seconds
+    r <- GET(base_url, query = list(q = q,
+                                    "api-key" = authentication$apikey_NYT,
+                                    "begin_date" = date1,
+                                    "end_date" = date2))
+    
+  }
+  
+  # Parse the return into R once no error
+  json <- content(r, "parsed")
+  
+  # Return the article count
+  return(json$response$meta$hits)
+}
+
+nyt_dates_count <- function(q, init, end, by){
+  # Note that init and end are now date objects and we can create a sequence with them
+  dates <- seq(from = init, to = end, by = by)
+  dates <- format(dates, "%Y%m%d") # changing date format to match NYT API date format
+  counts <- rep(NA, length(dates)-1)
+  
+  # Loop over periods
+  for (i in 1:(length(dates)-1)) { ## note the -1 here
+    # Update to track progress
+    message(dates[i])
+    # Retrieve count
+    counts[i] <- nyt_count(q = q, date1 = dates[i],
+                           date2 = dates[i + 1])
+    # Wait 6 seconds between requests as only 10 requests per minute allowed
+    Sys.sleep(6)
+  }
+  
+  # Now the function also returns a dataframe with two columns: date & count
+  df <- data.frame(name=rep(q,length(counts)), date = as.Date(dates[-length(dates)], format = "%Y%m%d"), count = counts)
+  return(df)
+}
+
+
+
+# Running the functions for each character
+total_mentions <- data.frame(name=c(), date = c(), count = c())
+for (i in 1:length(on_money)){
+  total_mentions <- rbind(total_mentions, nyt_dates_count(q = on_money[i], init = as.Date("1970/01/01"), 
+                          end = as.Date("2021/12/31"), by = "year"))
+}
+```
+
+#### The second scraping section identifies, for each figure, the year that the most articles mentioned their name. It collects data (ie. headline and wordcount) on each article for that year, for that figure.
+```{r, eval=FALSE}
+
+#Finding the year that each figure had the most mentions, articles in these years will be scraped for that figure
+years_most_mentions <- total_mentions %>% 
+  group_by(name) %>% 
+  filter(count == max(count)) %>% 
+  mutate(end_date = date %m+% years(1))
+
+# Adjusting so our script only searches for 1000 results for George Washington
+years_most_mentions$number_of_pages <- if_else(years_most_mentions$name == "George Washington", 100, years_most_mentions$count/10)
+years_most_mentions$number_of_pages[3]
+
+#Creating an empty dataframe
+article_info <- data.frame(name=c(), headline=c(), word_count = c())
+
+#Creating loop that runs for each individual and scrapes wordcount and headline for each article that mentions them
+for (i in 1:dim(years_most_mentions)[1]){
+  page_number = as.integer(0)
+  message(years_most_mentions$name[i])
+  while (page_number < as.integer(years_most_mentions$number_of_pages[i])){
+    page_number <- page_number + 1
+    message(page_number)
+    r <- GET(base_url, query = list(q = years_most_mentions$name[i],
+                                  "api-key" = authentication$apikey_NYT,
+                                  "page" = page_number,
+                                  "begin_date" = years_most_mentions$date[i],
+                                  "end_date" = years_most_mentions$end_date[i]))
+    results_json <- content(r, "parsed")
+    for (article in 1:length(results_json$response$docs)){
+      #Dealing with instances where the data is not provided
+      headline <- if_else(is.null(results_json$response$docs[[article]]$headline$print_headline),"Headline not provided",results_json$response$docs[[article]]$headline$print_headline)
+      word_count <- if_else(is.null(results_json$response$docs[[article]]$word_count),-999,
+      as.numeric(results_json$response$docs[[article]]$word_count))
+      
+      #Updating dataframes
+      temp_df <- data.frame(name =  years_most_mentions$name[i], headline = headline, word_count=word_count)
+      article_info <- rbind(article_info,temp_df)
+      
+      Sys.sleep(6)
+    }
+    
+  }
+}
+```
+
+
+#### Showing graphs on article mentions since 1970
+
+```{r}
+# Reading in saved data
+total_mentions <- read_csv('total_mentions.csv',show_col_types = FALSE)
+
+# Creating two graphs. Given that George Washington is such an outlier, we have created one including him and one excluding him, for comparison.
+plt_with_wash <- ggplot(total_mentions, aes(x=date,y=count, group=name, color=name)) + 
+  geom_line() + 
+  scale_colour_discrete(name = "Figure") + 
+  scale_x_date(expand=c(0,0)) + 
+  theme_bw() +
+  labs(title = "Published articles mentioning historical figure", y = "Number of mentions", x="Date") +
+  theme(plot.title = element_text(family="Times", face="bold"))
+
+plt_without_wash <- ggplot(total_mentions %>%  filter(name!= "George Washington"), aes(x=date,y=count, group=name, color=name)) + 
+  geom_line() + 
+  scale_colour_discrete(name = "Figure") + 
+  scale_x_date(expand=c(0,0)) + 
+  theme_bw() +
+  labs(title = "Published articles mentioning historical figure exc. Washington", y = "Number of mentions", x="Date") +
+  theme(plot.title = element_text(family="Times", face="bold"))
+
+# Printing graphs  
+grid.arrange(plt_with_wash, plt_without_wash, nrow=2)
+```
+
+
+
+#### These graphs indicate that George Washington is referenced far more than the other historical figures.
+
+#### We see a big increase in mentions of Andrew Jackson in recent years. We could hypothesise that this could be due to the analogies made between Jackson and Trump, or it could be due to the fact that he is due to be removed from US currency. Jackson will be replaced by Harriet Tubman on the $20 bill, and accordingly we see an increase in Tubman's mentions in recent years.
+
+
+
+
+#### In the next piece of analysis we show a distribution of article word count by historical figure:
+
+```{r}
+article_info <- read.csv('article_info.csv')
+ggplot(article_info %>% filter(word_count != -999), aes(x=reorder(name,-word_count,sum), y=log(word_count), colour=name)) + geom_jitter() + 
+  theme_bw() +
+  labs(title = "Distribution of article word count by historical figure", y = "Log of Word Count") +
+  theme(plot.title = element_text(family="Times", hjust= 0.5, vjust=-0.4, face="bold", size=17),
+        legend.position = "top",
+          legend.justification='left',
+        legend.title = element_blank(),
+        axis.title.x = element_blank()
+        )
+
+```
+
+#### We see that George Washington tends to be mentioned in articles which are shorter, when compared to the other figures included in the sample.
+
+
+
+
+#### In the next section we complete some text analysis with quanteda:
+```{r}
+
+# Cleaning data ready for analysis
+article_info_cleaned <-article_info %>% 
+  filter(headline != "Headline not provided" & word_count != -999) %>% 
+  group_by(name) %>%
+  mutate(counter = row_number(name)) %>%
+  mutate(doc_id = paste0(name,"_",counter))
+
+# Creating vectors of headlines and docvars
+headlines <- article_info_cleaned$headline
+names(headlines) <- article_info_cleaned$doc_id
+
+# Creating corpus, with docvars
+article_corpus <- corpus(headlines, docvars = data.frame(names=names(headlines)))
+docvars(article_corpus, "Figure") <- article_info_cleaned$name
+
+#  Creating dfm
+article_dfm <- article_corpus %>%
+    tokens(remove_punct = TRUE) %>%
+    tokens_remove(stopwords("en")) %>%
+    dfm() %>% 
+    dfm_group(groups = Figure)
+
+# Identifying top features across all articles
+topfeatures(article_dfm,20)
+
+# Creating word clouds for each president (as these figures have sufficient data)
+# Andrew Jackson word cloud
+textplot_wordcloud(dfm_subset(article_dfm, Figure == "Andrew Jackson"), 
+                   rotation=0, min_size=.75, max_size=3, max_words=50)
+# Abraham Lincoln word cloud
+textplot_wordcloud(dfm_subset(article_dfm, Figure == "Abraham Lincoln"), 
+                   rotation=0, min_size=.75, max_size=3, max_words=50)
+# George Washington word cloud
+textplot_wordcloud(dfm_subset(article_dfm, Figure == "George Washington"), 
+                   rotation=0, min_size=.75, max_size=3, max_words=50)
+```
+
+
+#### From this analysis above we can conclude some key points:
+#### Some political topics/figures seem of particular salience, eg. Iraq and Obama.
+#### Another point is that historical presidents tend to be mentioned along with more recent presidents.
+#### For instance: Jackson is mentioned along with Trump; Lincoln is mentioned with Obama; Washington is mentioned along with Bush.
+
+
+### Exercise 8 (35 points)
+
+This exercise is an independent project that allows you to illustrate and analyse data about a topic of your choice. You will first obtain data from APIs through R, organise and store it in a relational database, and then examine and present the topic through computations and visualisations.
+
+1. Read through this [list](https://github.com/public-apis/public-apis) of APIs mentioned in the lecture and choose any of the API(s) in which you are particularly interested. Make sure that the API(s) you choose contain data for a coherent analysis later on.
+
+2. Obtain the relevant data from your chosen API(s) __through R__ with packages such as `httr` or others. Then process the data in R e.g. with the typical `tidyverse` functionalities.
+
+3. Create a `SQLite` database, and store at least two tables into a well structured and thought through relational database (no need to store any data in the database that you do not need in your later analysis). Run SQL queries which return the first five rows and all columns of your tables (to give the reader a preview of what you have collected). Also run SQL queries to return the total amount of rows of your tables.
+
+4. Demonstrate which of the tables can be joined. Return __only__ the first five rows of the joined tables, and also return the total number of rows in the joined tables with a query.
+
+5. Now query the database with SQL to obtain data for the main analysis of this exercise. Afterwards you can do all subsequent steps with R. Analyse and illustrate your data e.g. numerically with packages such as `dplyr`, through visualisations based on `ggplot2`, quantitative text analysis with `quanteda`, other packages, and/or written discussion.
+
+More creative and extensive projects that obtain and combine data from more than one API into a clean database, and then present and discuss the data with a coherent and detailed analysis will receive higher marks here.
+
+
+1.
+
+#### This project will explore how iconic British writers (Charles Dickens, Jane Austen, Robert Burns) feature
+#### as part of the 'collective memory' and how they are mentioned and represented in the media and literature.
+
+#### The idea is that we will try to understand how often they are referenced over time, both in newspaper articles
+#### and in printed books.
+
+#### I will therefore be using the Wikidata API, the Guardian API and the Google Books API to identify references and extract information on these references.
+
+#### Note: To ensure that the script runs on knitting for Q8 I have not taken all data from the Guardian or Google API. This means that the analysis below ultimately uses an incomplete sample. Whilst this undermines the analysis to an extent, it seemed a sensible decision in the context of the assignment.
+
+2.
+
+#### Downloading newspaper article data from Guardian API
+
+```{r}
+author_ref <- data.frame(Author=c("Charles Dickens", "Jane Austen", "Robert Burns") ,
+           Tag=c("books/charlesdickens","books/janeausten","books/robertburns"))
+
+uk_article_results <-  data.frame(author=c(),
+                                  id = c(),
+                                  sectionName = c(),
+                                  webPublicationDate = c(),
+                                  webTitle = c(),
+                                  webUrl = c(),
+                                  apiUrl = c(),
+                                  isHosted = c(),
+                                  pillarId = c(),
+                                  pillarName = c(),
+                                  tags= c(),
+                                  headline = c(),
+                                  body =c()
+                                  )
+
+base_url <- "https://content.guardianapis.com/search"
+
+# Scraping Guardian articles for each author
+for (i in 1:dim(author_ref)[1]){
+  page_number <- 0
+  tags_to_search = author_ref$Tag[i]
+  author_to_search_for <- author_ref$Author[i]
+  while (page_number <= 5){
+    page_number <- page_number + 1
+    r <- GET(base_url, query = list(tag=tags_to_search,
+                                    q = author_to_search_for,
+                                  "api-key" = authentication$apikey_guardian,
+                                  "page" = page_number,
+                                  "show-fields"="body,headline", 
+                                  "show-tags" = "keyword"))
+    results_json <- content(r, "parsed")
+
+    json <- content(r, "parsed")
+    for (article in json$response$results){
+      #print(article$id)
+      concat_tags = "0"
+      for (i in article$tags){
+        if (concat_tags == "0"){
+          concat_tags = i$id
+        }
+        else{
+            concat_tags<- paste0(concat_tags,",",i$id)
+        }
+      }
+    
+      df <- data.frame(author= author_to_search_for,
+                       id = article$id,
+                      sectionName = article$sectionName,
+                      webPublicationDate = article$webPublicationDate,
+                      webTitle = article$webTitle,
+                      webUrl = article$webUrl,
+                      apiUrl = article$apiUrl,
+                      isHosted = article$isHosted,
+                      pillarId = article$pillarId,
+                      pillarName = article$pillarName,
+                      tags= concat_tags,
+                      headline = article$fields$headline,
+                      body = article$fields$body
+                       )
+      uk_article_results <- rbind(uk_article_results, df)
+    }
+  Sys.sleep(2)
+  }
+}
+```
+
+#### Downloading information on the authors' notable works from Wikidata API
+
+```{r}
+
+
+# Creating queries for scraping
+endpoint <- "https://query.wikidata.org/sparql"
+query_dickens <- ('SELECT ?book ?bookLabel
+    WHERE 
+    {
+      wd:Q5686 wdt:P800 ?book.
+      SERVICE wikibase:label {bd:serviceParam wikibase:language "en". 
+      }
+    }
+')
+query_austen <- ('SELECT ?book ?bookLabel
+    WHERE 
+    {
+      wd:Q36322 wdt:P800 ?book.
+      SERVICE wikibase:label {bd:serviceParam wikibase:language "en". 
+      }
+    }
+')
+query_burns <- ('SELECT ?book ?bookLabel
+    WHERE 
+    {
+      wd:Q81960 wdt:P800 ?book.
+      SERVICE wikibase:label {bd:serviceParam wikibase:language "en". 
+      }
+    }
+')
+
+useragent <- paste("osconr", R.version.string)
+
+
+# Scraping Wikidata on authors' notable works
+dickens_wiki <- SPARQL(endpoint,query_dickens,curl_args=list(useragent=useragent))
+dickens_books <- dickens_wiki$results
+dickens_books$author <- "Charles Dickens"
+austen_wiki <- SPARQL(endpoint,query_austen,curl_args=list(useragent=useragent))
+austen_books <- austen_wiki$results
+austen_books$author <- "Jane Austen"
+burns_wiki <- SPARQL(endpoint,query_burns,curl_args=list(useragent=useragent))
+burns_books <- burns_wiki$results
+burns_books$author <- "Robert Burns"
+
+#Cleaning and combining wikidata into one dataframe
+notable_works <- rbind(dickens_books,austen_books,burns_books)
+notable_works$bookLabel <- gsub('"@en', '',notable_works$bookLabel)
+notable_works$bookLabel <- gsub('"', '',notable_works$bookLabel)
+notable_works <- select(notable_works, -book)
+colnames(notable_works)[1] <- "notableWork"
+```
+
+
+
+#### Downloading data from the Google Books API on books that relate to the authors
+
+```{r}
+# Preparing information for querying
+g_url <- 'https://www.googleapis.com/books/v1/volumes'
+
+uk_book_results <-  data.frame(author=c(),
+                  title = c(),
+                  textSnippet = c(),
+                  description = c(),
+                  publishedDate = c()
+                  )
+
+#Running querying information
+for (i in 1:dim(author_ref)[1]){
+  search_index <- -10
+  author_to_search_for <- author_ref$Author[i]
+  while (search_index < 100){
+    search_index <- search_index +10
+    g <- GET(g_url, query = list(q = (author_to_search_for), printType="books", startIndex=search_index, "api-key" = authentication$apikey_googlebooks))
+    g_json <- content(g, "parsed")
+    
+    for (book in g_json$items){
+      # Dealing with missing information
+      title <- if_else(is.null(book$volumeInfo$title),"Title not provided",book$volumeInfo$title)
+      textSnippet = if_else(is.null(book$searchInfo$textSnippet),"Snippet not provided",book$searchInfo$textSnippet)
+      description = if_else(is.null(book$volumeInfo$description),"Description not provided",book$volumeInfo$description)
+      publishedDate = if_else(is.null(book$volumeInfo$publishedDate),"Published date not provided",book$volumeInfo$publishedDate)
+      
+      # Appending data to dataframe
+      df <- data.frame(author=author_to_search_for,
+                       title = title,
+                             textSnippet =   textSnippet,
+                                description = description,
+                                publishedDate = publishedDate)
+    
+        uk_book_results <- rbind(uk_book_results, df)
+    }
+  Sys.sleep(2)
+  }
+}
+
+```
+
+
+3.
+
+#### The code below cleans and manipulates the data and then adds it to the database.
+
+#### Note: In the loop below articles and books are linked to a notable work by the author. A simplifying assumption is made that a text excerpt only refers to one notable work. Whilst many of the articles/book blurbs actually do make reference to more than one notable work, this assumption was made to make the data structures more feasible and to facilitate analysis.
+
+```{r}
+#Checking to see which works appear in which headline
+for (writer in author_ref$Author){ 
+  temp_df <- notable_works %>% filter(author == writer)
+  for (work in 1:dim(temp_df)[1]){
+    uk_article_results$notableWork <- if_else(grepl(temp_df$notableWork[work], uk_article_results$body), temp_df$notableWork[work], uk_article_results$notableWork)
+    uk_book_results$notableWork <- if_else(grepl(temp_df$notableWork[work], uk_book_results$textSnippet), temp_df$notableWork[work], uk_book_results$notableWork)
+  }
+}
+
+#Removing articles and books which do not have a clear reference to any notable work of the author:
+uk_article_results <- uk_article_results %>% filter(!is.na(notableWork))
+uk_book_results <- uk_book_results %>% filter(!is.na(notableWork))
+
+
+#  Changing data format and removing unnecessary columns
+uk_article_results$publicationYear <- as.numeric(substr(uk_article_results$webPublicationDate,1,4))
+uk_article_results <- select(uk_article_results, all_of(c("id", "publicationYear","headline","body","notableWork")))
+uk_book_results$publicationYear <- as.numeric(substr(uk_book_results$publishedDate,1,4))
+uk_book_results <- select(uk_book_results, -all_of(c("author", "publishedDate")))
+
+
+# Adding three tables to the database
+db <- dbConnect(RSQLite::SQLite(), "authors.sqlite")
+dbWriteTable(db, "notable_works", notable_works, overwrite=TRUE)
+dbWriteTable(db, "uk_article_results", uk_article_results, overwrite=TRUE)
+dbWriteTable(db, "uk_book_results", uk_book_results, overwrite=TRUE)
+
+#Printing first 5 rows of notable_works table
+dbGetQuery(db, 
+  "SELECT *
+  FROM notable_works
+  LIMIT 5")
+# Listing column names of uk_article_results
+dbListFields(db, "notable_works")
+#Printing row count of notable_works table
+dbGetQuery(db, 
+  "SELECT COUNT(*)
+  FROM notable_works")
+
+#Printing first 5 rows of uk_article_results table
+dbGetQuery(db, 
+  "SELECT *
+  FROM uk_article_results
+  LIMIT 5")
+# Listing column names of uk_article_results
+dbListFields(db, "uk_article_results")
+#Printing row count of uk_article_results table
+dbGetQuery(db, 
+  "SELECT COUNT(*)
+  FROM uk_article_results")
+
+#Printing first 5 rows of uk_book_results table
+dbGetQuery(db, 
+  "SELECT *
+  FROM uk_book_results
+  LIMIT 5")
+# Listing column names of uk_book_results
+dbListFields(db, "uk_book_results")
+#Printing row count of uk_book_results table
+dbGetQuery(db, 
+  "SELECT COUNT(*)
+  FROM uk_book_results")
+
+
+```
+
+4.
+
+#### In section 4 I join the tables. I have one table, *notable_works*, which is a list of all the notable works for each author. I can therefore join this with the other tables to see which articles and books mention/discuss these works. Author is only stored in the notable_works table, as this ensures unnecessary strings are not kept in the other tables.
+
+```{r}
+# Joining uk_article_results with notable_works 
+dbGetQuery(db, 
+  "SELECT notable_works.author, uk_article_results.*
+  FROM notable_works
+  JOIN uk_article_results ON notable_works.notableWork = uk_article_results.notableWork
+  LIMIT 5")
+#Counting rows of joined table
+dbGetQuery(db, 
+  "SELECT COUNT(*)
+  FROM notable_works
+  JOIN uk_article_results ON notable_works.notableWork = uk_article_results.notableWork")
+
+# Joining uk_book_results with notable_works 
+dbGetQuery(db, 
+  "SELECT notable_works.author, uk_book_results.*
+  FROM notable_works
+  JOIN uk_book_results ON notable_works.notableWork = uk_book_results.notableWork
+  LIMIT 5")
+#Counting rows of joined table
+dbGetQuery(db, 
+  "SELECT COUNT(*)
+  FROM notable_works
+  JOIN uk_book_results ON notable_works.notableWork = uk_book_results.notableWork")
+
+
+```
+
+5.
+
+#### First we will look at which notable works are mentioned most in the articles and book information that has been collected.
+```{r}
+articles_analysis <- dbGetQuery(db, 
+  "SELECT notable_works.author, uk_article_results.*
+  FROM notable_works
+  JOIN uk_article_results ON notable_works.notableWork = uk_article_results.notableWork")
+
+
+articles_analysis_summary <- articles_analysis %>% 
+  group_by(author, notableWork) %>% 
+  summarise(notableWorkCount = n())
+
+
+
+ggplot(articles_analysis_summary , aes(x=reorder(notableWork, notableWorkCount, sum), y=notableWorkCount, fill=author))+
+  geom_bar(stat="identity") +
+  scale_fill_manual(name="Author", values = c("palegreen3","indianred1","royalblue1"))+
+  coord_flip() +
+  theme_bw() +
+  labs(title = "Count of articles mentioning works", y = "Number of articles") +
+  theme(plot.title = element_text(family="Times", hjust= 0.5, vjust=-0.4, face="bold", size=15),
+        axis.title.y = element_blank(),
+        legend.position = "top",
+        legend.title = element_blank()
+        )
+
+```
+
+
+#### Here we can see that the most referenced works are Pride and Prejudice and A Christmas Carol. Generally Burns's works appear to be referenced less frequently, although perhaps this is to be expected given that they are poems rather than novels.
+
+
+
+#### Next I will look at the top features mentioned in all newspaper articles by author
+```{r}
+# Filtering data to remove any articles where the full body of text is not provided
+articles_analysis <- filter(articles_analysis, articles_analysis$body != "")
+
+#Ingesting the html text into actual text
+articles_analysis$body <- sapply(articles_analysis$body, function(x) html_text(read_html(x)))
+
+#Creating a corpus
+uk_article_corpus <- corpus(articles_analysis$body)
+docvars(uk_article_corpus, "Author") <- articles_analysis$author
+
+# Creating a grouped dfm matrix
+uk_article_dfm_author <- uk_article_corpus %>%
+    tokens(remove_punct = TRUE) %>%
+    tokens_remove(stopwords("en")) %>%
+    tokens_ngrams(n = 1:2) %>% 
+    dfm() %>% 
+    dfm_group(groups = Author)
+
+# Obtaining the top 25 features per author
+topfeatures(uk_article_dfm_author,25, groups=Author)
+
+
+```
+
+#### A few things stand out looking at the top features for each author:
+#### Dickens - London is one of the words most commonly referenced in the newspaper articles. Dickens was a 'great' (another of the most common words in his articles) chronicler of London and so it should perhaps not be a suprise that this word features.
+
+#### Austen - The words house, people, and mr all could be interpreted as reference to the typical setting of an Austen novel; the polite society of a country house.
+
+#### Most notable among the Burns top features is how prominently nationality features. Both English and Scottish and the word 'national' feature. This is perhaps most interesting when contrasting with Dickens and Austen, for whom these words do not feature at all, despite both of them being considered English/British national icons. 
+
+
+#### Next I will look at the number of references for each author over time.
+
+```{r}
+# Getting books data from database
+books_analysis <- dbGetQuery(db, 
+  "SELECT notable_works.author, uk_book_results.*
+  FROM notable_works
+  JOIN uk_book_results ON notable_works.notableWork = uk_book_results.notableWork")
+
+# Binding tables into one dataset
+mentions_over_time <- rbind(select(articles_analysis, all_of(c("author","publicationYear"))),select(books_analysis, all_of(c("author","publicationYear"))))
+
+mentions_over_time <- mentions_over_time %>% 
+  group_by(author,publicationYear) %>%
+  filter(publicationYear >= 2014 & publicationYear < 2022) %>% 
+  summarise(mentions = n())
+ 
+
+ggplot(mentions_over_time, aes(x=publicationYear,y=mentions, group=author, color=author)) + geom_line() +  
+  theme_bw() +
+  scale_colour_discrete(name = "Author") +
+  scale_x_continuous(expand=c(0,0)) +
+  labs(title = "Published articles/books mentioning our author", y = "Number of mentions", x="Date") +
+  theme(plot.title = element_text(family="Times", hjust= 0.5, vjust=-0.4, face="bold", size=15)
+        )
+
+```
+
+#### We can see here that, in our sample, there appears greater mentions in all the authors in the more recent years. Whilst it is possible this is because our sample is skewed, it could also be because of a boom in people reading over lockdown!
+
